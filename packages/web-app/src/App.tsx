@@ -26,6 +26,7 @@ const ADMIN_UI = (() => {
 const GUEST_MODE_STORAGE_KEY = "app-guest-mode:v1";
 const GUEST_PERSONAS_STORAGE_KEY = "guest-personas:v1";
 const GUEST_UPGRADE_META_STORAGE_KEY = "guest-upgrade-meta:v1";
+const PROFILE_ENRICHMENT_STORAGE_PREFIX = "profile-enrichment:v1";
 const PERSONA_VISUAL_ASSETS_STORAGE_KEY = "persona-visual-assets:v1";
 const PERSONA_APPEARANCE_STORAGE_KEY = "persona-appearance:v1";
 const GUEST_SESSION = {
@@ -36,6 +37,45 @@ const GUEST_SESSION = {
     email: "",
   },
 };
+
+const PROFILE_ENRICHMENT_QUESTIONS = [
+  {
+    id: "conflict",
+    title: "冲突与修复",
+    prompt: "和在意的人发生矛盾后，你更倾向怎么处理？",
+    options: ["立即说清楚", "先冷静再沟通", "用行动慢慢修复", "等对方先开口"],
+  },
+  {
+    id: "energy",
+    title: "能量恢复",
+    prompt: "当你很累时，哪种方式最容易让你恢复状态？",
+    options: ["完全独处", "和一两个熟人相处", "去热闹场景换心情", "去新地方或做新鲜事"],
+  },
+  {
+    id: "decision",
+    title: "决策方式",
+    prompt: "面对重要选择，你最信任什么？",
+    options: ["事实和数据", "内心价值观", "当下直觉", "重要他人的反馈"],
+  },
+  {
+    id: "expression",
+    title: "沟通风格",
+    prompt: "你希望自己的数字人格如何表达？",
+    options: ["直接清晰", "温和有共情", "幽默有棗", "先思考再回答"],
+  },
+  {
+    id: "boundary",
+    title: "关系边界",
+    prompt: "在亲密关系中，你最看重哪一点？",
+    options: ["保留独立空间", "稳定及时的回应", "坦诚不隐瞒", "一起成长和探索"],
+  },
+  {
+    id: "companion",
+    title: "伴生兽定位",
+    prompt: "你希望伴生兽更像哪种伙伴？",
+    options: ["守护者", "共同冒险的搭档", "照见内心的镜子", "推动我突破的挑战者"],
+  },
+] as const;
 
 type SharedConversationMode = "agent" | "human" | "mixed";
 type SharedMessageSourceKind = "human" | "agent" | "system";
@@ -3460,6 +3500,12 @@ function HomePage({
   const [activePersona, setActivePersona] = useState<any>(null);
   const [personasLoaded, setPersonasLoaded] = useState(false);
   const [firstPersonaOnboardingOpen, setFirstPersonaOnboardingOpen] = useState(false);
+  const [profileEnrichmentTargetId, setProfileEnrichmentTargetId] = useState("");
+  const [profileEnrichmentOpen, setProfileEnrichmentOpen] = useState(false);
+  const [profileEnrichmentStep, setProfileEnrichmentStep] = useState(0);
+  const [profileEnrichmentAnswers, setProfileEnrichmentAnswers] = useState<Record<string, string>>({});
+  const [profileEnrichmentDetail, setProfileEnrichmentDetail] = useState("");
+  const [profileEnrichmentSaving, setProfileEnrichmentSaving] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   // Guest Upgrade Dialog State
@@ -3539,6 +3585,80 @@ function HomePage({
       const id = p?.id != null ? String(p.id) : "";
       if (id) localStorage.setItem(activePersonaStorageKey, id);
     } catch {}
+  };
+
+  const enrichmentStorageKey = (personaId: string, suffix: "draft" | "complete") =>
+    `${PROFILE_ENRICHMENT_STORAGE_PREFIX}:${String(session?.user?.id || "account")}:${personaId}:${suffix}`;
+
+  const openProfileEnrichment = (personaId: string) => {
+    const id = String(personaId || "").trim();
+    if (!id) return;
+    let draft: { step?: number; answers?: Record<string, string>; detail?: string } = {};
+    try {
+      draft = JSON.parse(localStorage.getItem(enrichmentStorageKey(id, "draft")) || "{}");
+    } catch {}
+    setProfileEnrichmentTargetId(id);
+    setProfileEnrichmentStep(Math.max(0, Math.min(PROFILE_ENRICHMENT_QUESTIONS.length - 1, Number(draft.step) || 0)));
+    setProfileEnrichmentAnswers(draft.answers && typeof draft.answers === "object" ? draft.answers : {});
+    setProfileEnrichmentDetail(String(draft.detail || ""));
+    setProfileEnrichmentOpen(true);
+  };
+
+  const persistEnrichmentDraft = (personaId: string, step: number, answers: Record<string, string>, detail = "") => {
+    try {
+      localStorage.setItem(enrichmentStorageKey(personaId, "draft"), JSON.stringify({ step, answers, detail }));
+    } catch {}
+  };
+
+  const saveProfileEnrichment = async (answers: Record<string, string>) => {
+    const personaId = String(profileEnrichmentTargetId || "").trim();
+    if (!personaId) return;
+    const target = personas.find((persona) => String(persona?.id) === personaId);
+    if (!target) return;
+    setProfileEnrichmentSaving(true);
+    try {
+      const summary = PROFILE_ENRICHMENT_QUESTIONS
+        .map((question) => `${question.title}：${answers[question.id] || ""}`)
+        .filter((line) => !line.endsWith("："))
+        .join("；");
+      const nextLogic = [String(target?.logic || "").trim(), `【深度人格补全】${summary}`]
+        .filter(Boolean)
+        .join("\n")
+        .slice(0, 4000);
+      const nextTraits = summary.slice(0, 2000);
+      let update = await supabase
+        .from("personas")
+        .update({ logic: nextLogic, custom_traits: nextTraits })
+        .eq("id", personaId)
+        .eq("user_id", session.user.id)
+        .select()
+        .single();
+      if (update.error && String(update.error.message || "").toLowerCase().includes("column")) {
+        update = await supabase
+          .from("personas")
+          .update({ logic: nextLogic })
+          .eq("id", personaId)
+          .eq("user_id", session.user.id)
+          .select()
+          .single();
+      }
+      if (update.error) throw update.error;
+      const nextPersona = update.data || { ...target, logic: nextLogic, custom_traits: nextTraits };
+      setPersonas((items) => items.map((item) => (String(item?.id) === personaId ? nextPersona : item)));
+      if (String(activePersona?.id || "") === personaId) setActivePersonaAndPersist(nextPersona);
+      try {
+        localStorage.setItem(enrichmentStorageKey(personaId, "complete"), "1");
+        localStorage.removeItem(enrichmentStorageKey(personaId, "draft"));
+      } catch {}
+      setProfileEnrichmentOpen(false);
+      setProfileEnrichmentTargetId("");
+      showHud("success", "深度人格已补全，后续匹配、对话与伴生兽生成会使用这些线索。");
+    } catch (error: any) {
+      console.error("保存深度人格失败", error);
+      showHud("error", "保存失败，答案已留在本机，请稍后重试。");
+    } finally {
+      setProfileEnrichmentSaving(false);
+    }
   };
 
   const deletePersonaCard = async (persona: any) => {
@@ -5103,8 +5223,9 @@ function HomePage({
       }
       if (!session?.user?.id) return;
       setPersonasLoaded(false);
+      let upgraded = { migratedCount: 0, preferredPersonaId: "" };
       try {
-        const upgraded = await migrateGuestPersonasToAccount(String(session.user.id || ""));
+        upgraded = await migrateGuestPersonasToAccount(String(session.user.id || ""));
         if (upgraded.preferredPersonaId && activePersonaStorageKey) {
           localStorage.setItem(activePersonaStorageKey, upgraded.preferredPersonaId);
         }
@@ -5119,6 +5240,14 @@ function HomePage({
       
       if (!error && data) {
         setPersonas(data);
+        if (upgraded.migratedCount > 0) {
+          const targetId = String(upgraded.preferredPersonaId || data[0]?.id || "").trim();
+          let completed = false;
+          try {
+            completed = Boolean(targetId && localStorage.getItem(enrichmentStorageKey(targetId, "complete")) === "1");
+          } catch {}
+          if (targetId && !completed) openProfileEnrichment(targetId);
+        }
         setActivePersona((prev: any) => {
           if (data.length === 0) return null;
           let preferredId = "";
@@ -6461,6 +6590,131 @@ function HomePage({
           </div>
         </div>
       ) : null}
+      {!profileEnrichmentOpen && profileEnrichmentTargetId ? (
+        <button
+          type="button"
+          onClick={() => openProfileEnrichment(profileEnrichmentTargetId)}
+          className="fixed bottom-5 right-5 z-[65] rounded-full border border-[#007AFF]/30 bg-[#007AFF] px-5 py-3 text-sm font-bold text-white shadow-[0_16px_40px_rgba(0,122,255,0.35)] transition-transform hover:-translate-y-0.5"
+        >
+          继续完善人格
+        </button>
+      ) : null}
+
+      {profileEnrichmentOpen && profileEnrichmentTargetId ? (() => {
+        const question = PROFILE_ENRICHMENT_QUESTIONS[profileEnrichmentStep];
+        const storedAnswer = String(profileEnrichmentAnswers[question.id] || "");
+        const selectedOption = storedAnswer.split("｜补充：")[0];
+        const isLast = profileEnrichmentStep === PROFILE_ENRICHMENT_QUESTIONS.length - 1;
+        return (
+          <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-[620px] overflow-hidden rounded-3xl border border-app-border/15 bg-app-elevated text-app-fg shadow-2xl">
+              <div className="border-b border-app-border/12 p-5 sm:p-6">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[#69b1ff]">注册已完成 · 深度人格补全</div>
+                    <h2 className="mt-2 text-xl font-extrabold">让数字人格更像真实的你</h2>
+                    <p className="mt-2 text-sm leading-6 text-app-muted">
+                      游客卡片已保留。再回答 6 个选择题，用于优化匹配、对话风格和伴生兽设定，约 2 分钟。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      persistEnrichmentDraft(profileEnrichmentTargetId, profileEnrichmentStep, profileEnrichmentAnswers, profileEnrichmentDetail);
+                      setProfileEnrichmentOpen(false);
+                    }}
+                    className="shrink-0 rounded-full border border-app-border/15 px-3 py-1.5 text-xs text-app-muted hover:bg-app-surface/30 hover:text-app-fg"
+                  >
+                    稍后填写
+                  </button>
+                </div>
+                <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-app-surface/40">
+                  <div
+                    className="h-full rounded-full bg-[#007AFF] transition-all"
+                    style={{ width: `${((profileEnrichmentStep + 1) / PROFILE_ENRICHMENT_QUESTIONS.length) * 100}%` }}
+                  />
+                </div>
+                <div className="mt-2 text-right text-xs text-app-muted">{profileEnrichmentStep + 1} / {PROFILE_ENRICHMENT_QUESTIONS.length}</div>
+              </div>
+
+              <div className="space-y-5 p-5 sm:p-6">
+                <div>
+                  <div className="text-xs font-semibold text-[#69b1ff]">{question.title}</div>
+                  <div className="mt-2 text-lg font-bold leading-7">{question.prompt}</div>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {question.options.map((option) => (
+                    <button
+                      type="button"
+                      key={option}
+                      onClick={() => {
+                        const next = { ...profileEnrichmentAnswers, [question.id]: option };
+                        setProfileEnrichmentAnswers(next);
+                        persistEnrichmentDraft(profileEnrichmentTargetId, profileEnrichmentStep, next, profileEnrichmentDetail);
+                      }}
+                      className={`rounded-2xl border px-4 py-3 text-left text-sm font-medium transition-colors ${
+                        selectedOption === option
+                          ? "border-[#007AFF]/60 bg-[#007AFF]/15 text-[#8ec5ff]"
+                          : "border-app-border/15 bg-app-surface/20 text-app-fg hover:bg-app-surface/35"
+                      }`}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+                <div>
+                  <label className="text-xs text-app-muted">想补充一句？（可选）</label>
+                  <input
+                    value={profileEnrichmentDetail}
+                    onChange={(event) => setProfileEnrichmentDetail(event.target.value.slice(0, 160))}
+                    placeholder="例如：我需要先独处半天，之后才能好好沟通"
+                    className="mt-2 w-full rounded-2xl border border-app-border/15 bg-app-bg/35 px-4 py-3 text-sm text-app-fg outline-none placeholder:text-app-muted/60 focus:border-[#007AFF]/50 focus:ring-2 focus:ring-[#007AFF]/15"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-3 pt-1">
+                  <button
+                    type="button"
+                    disabled={profileEnrichmentStep === 0 || profileEnrichmentSaving}
+                    onClick={() => {
+                      const previousStep = Math.max(0, profileEnrichmentStep - 1);
+                      setProfileEnrichmentStep(previousStep);
+                      setProfileEnrichmentDetail("");
+                      persistEnrichmentDraft(profileEnrichmentTargetId, previousStep, profileEnrichmentAnswers);
+                    }}
+                    className="rounded-full border border-app-border/15 px-5 py-2.5 text-sm font-semibold text-app-muted hover:bg-app-surface/30 disabled:opacity-40"
+                  >
+                    上一题
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectedOption || profileEnrichmentSaving}
+                    onClick={() => {
+                      const answer = profileEnrichmentDetail.trim()
+                        ? `${selectedOption}｜补充：${profileEnrichmentDetail.trim()}`
+                        : selectedOption;
+                      const nextAnswers = { ...profileEnrichmentAnswers, [question.id]: answer };
+                      setProfileEnrichmentAnswers(nextAnswers);
+                      if (isLast) {
+                        void saveProfileEnrichment(nextAnswers);
+                        return;
+                      }
+                      const nextStep = profileEnrichmentStep + 1;
+                      setProfileEnrichmentStep(nextStep);
+                      setProfileEnrichmentDetail("");
+                      persistEnrichmentDraft(profileEnrichmentTargetId, nextStep, nextAnswers);
+                    }}
+                    className="rounded-full bg-[#007AFF] px-6 py-2.5 text-sm font-bold text-white hover:bg-[#0066d6] disabled:opacity-50"
+                  >
+                    {profileEnrichmentSaving ? "保存中..." : isLast ? "完成人格补全" : "下一题"}
+                  </button>
+                </div>
+                <p className="text-center text-[11px] leading-5 text-app-muted">答案仅用于你的人格体验，可以稍后继续，不会覆盖已有游客卡片。</p>
+              </div>
+            </div>
+          </div>
+        );
+      })() : null}
+
       {firstPersonaOnboardingOpen && (
         <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-[520px] rounded-2xl border border-app-border/15 bg-app-elevated/95 text-app-fg overflow-hidden shadow-2xl">
@@ -7269,6 +7523,9 @@ function HomePage({
                         setIsCreatingPersona(false);
                         if (isGuest) {
                           showHud("success", "游客卡片已创建成功。注册后可继续使用动态、对话、蒸馏与 3D 功能。");
+                        } else {
+                          const createdPersonaId = String((data as any)?.id || "").trim();
+                          if (createdPersonaId) openProfileEnrichment(createdPersonaId);
                         }
                         try {
                           const uid = String(session?.user?.id || "").trim();
