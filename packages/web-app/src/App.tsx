@@ -5173,14 +5173,16 @@ function HomePage({
       setLoadingTab(true);
 
       const loadOtherPersonas = async () => {
+        // Guest onboarding must remain fully local. Fetching the shared persona
+        // directory here both slows down first-run and exposes backend/RLS
+        // implementation details when Supabase is unavailable.
+        if (isGuest) return [];
         const uid = String(session?.user?.id || "").trim();
         const query = supabase.from("personas").select("*");
         const { data, error } = uid && uid !== "guest-local" ? await query.neq("user_id", uid) : await query;
         if (error) {
-          showHud(
-            "error",
-            `加载推荐卡片失败：${error.message}（通常是 personas 表 RLS 未允许读取他人数据）`,
-          );
+          console.error("加载推荐卡片失败", error);
+          showHud("info", "推荐内容暂时不可用，不影响创建和管理你的人格卡片。");
           return [];
         }
         return data || [];
@@ -7096,11 +7098,17 @@ function HomePage({
                   </button>
                   <p className="text-sm text-app-muted text-center">输入名字后点击确认继续</p>
                 </div>
-              ) : personaStep < QUESTIONS.length ? (
+              ) : personaStep < (isGuest ? Math.min(3, QUESTIONS.length) : QUESTIONS.length) ? (
                 <div className="bg-[#242424] p-8 rounded-3xl border border-white/5 shadow-xl flex flex-col gap-6">
                   <div className="bg-blue-900/20 text-blue-300 p-4 rounded-xl text-sm font-medium border border-blue-500/20 flex justify-between items-center">
                     <span>正在构建「{newPersonaName}」的灵魂画像</span>
-                    <span className="bg-blue-900/40 px-2 py-1 rounded text-xs">({personaStep + 1}/{QUESTIONS.length})</span>
+                    <span className="bg-blue-900/40 px-2 py-1 rounded text-xs">({personaStep + 1}/{isGuest ? Math.min(3, QUESTIONS.length) : QUESTIONS.length})</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-white/10" aria-label="创建进度">
+                    <div
+                      className="h-full rounded-full bg-blue-400 transition-all"
+                      style={{ width: `${((personaStep + 1) / (isGuest ? Math.min(3, QUESTIONS.length) : QUESTIONS.length)) * 100}%` }}
+                    />
                   </div>
                   <p className="font-bold text-app-fg text-xl mt-4 leading-relaxed">{QUESTIONS[personaStep]}</p>
                   
@@ -7112,20 +7120,41 @@ function HomePage({
                     className="p-4 bg-[#131313] text-app-fg border border-white/10 rounded-xl focus:ring-1 focus:ring-white/30 focus:border-white/30 resize-none outline-none text-lg transition-all placeholder-app-muted mt-2"
                   ></textarea>
                   
-                  <button 
-                    onClick={() => {
-                      if (!currentAnswer.trim()) {
-                        alert("请填写回答");
-                        return;
-                      }
-                      setPersonaAnswers([...personaAnswers, { q: QUESTIONS[personaStep], a: currentAnswer }]);
-                      setPersonaStep(personaStep + 1);
-                      setCurrentAnswer("");
-                    }}
-                    className="self-end bg-white hover:bg-gray-200 text-black py-3 px-8 rounded-full font-bold transition-colors mt-4"
-                  >
-                    提交回答
-                  </button>
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (personaStep === 0) {
+                          setNewPersonaName("");
+                          return;
+                        }
+                        const previous = personaAnswers[personaStep - 1];
+                        setPersonaAnswers((items) => items.slice(0, -1));
+                        setPersonaStep((step) => Math.max(0, step - 1));
+                        setCurrentAnswer(String(previous?.a || ""));
+                      }}
+                      className="rounded-full border border-white/15 px-5 py-3 text-sm font-semibold text-app-muted transition-colors hover:bg-white/5 hover:text-app-fg"
+                    >
+                      上一步
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!currentAnswer.trim()) {
+                          alert("请填写回答");
+                          return;
+                        }
+                        setPersonaAnswers([...personaAnswers, { q: QUESTIONS[personaStep], a: currentAnswer }]);
+                        setPersonaStep(personaStep + 1);
+                        setCurrentAnswer("");
+                      }}
+                      className="bg-white hover:bg-gray-200 text-black py-3 px-8 rounded-full font-bold transition-colors"
+                    >
+                      {personaStep + 1 >= (isGuest ? Math.min(3, QUESTIONS.length) : QUESTIONS.length) ? "查看人格预览" : "下一题"}
+                    </button>
+                  </div>
+                  <p className="text-center text-xs text-app-muted">
+                    {isGuest ? "游客仅需 3 题，约 1 分钟生成基础人格预览。" : "回答会自动保留在当前创建流程中。"}
+                  </p>
                 </div>
               ) : (
                 <div className="bg-[#242424] p-10 rounded-3xl border border-white/5 shadow-xl flex flex-col gap-8 items-center py-16">

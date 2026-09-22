@@ -3,6 +3,8 @@ import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { Readable } from "node:stream";
+import { promises as dns } from "node:dns";
+import { isIP } from "node:net";
 import path from "node:path";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -139,22 +141,76 @@ async function requireSupabaseUserId(req: express.Request): Promise<string> {
   return String(data.user.id);
 }
 
-const feedbackRate = new Map<string, { count: number; resetAt: number }>();
+const requestRates = new Map<string, { count: number; resetAt: number }>();
 
-function checkFeedbackRateLimit(req: express.Request) {
-  const now = Date.now();
+function requestIp(req: express.Request) {
   const xf = String(req.header("x-forwarded-for") || "");
-  const ip = (xf.split(",")[0] || "").trim() || String(req.ip || "");
-  const key = ip || "unknown";
-  const windowMs = 60 * 60 * 1000;
-  const max = 10;
-  const cur = feedbackRate.get(key);
+  return (xf.split(",")[0] || "").trim() || String(req.ip || "") || "unknown";
+}
+
+function checkRateLimit(req: express.Request, bucket: string, max: number, windowMs = 60 * 60 * 1000) {
+  const now = Date.now();
+  const key = `${bucket}:${requestIp(req)}`;
+  const cur = requestRates.get(key);
   if (!cur || cur.resetAt <= now) {
-    feedbackRate.set(key, { count: 1, resetAt: now + windowMs });
+    requestRates.set(key, { count: 1, resetAt: now + windowMs });
     return;
   }
   if (cur.count >= max) throw new ApiError("TOO_MANY_REQUESTS", 429, "请求过于频繁，请稍后再试");
   cur.count += 1;
+}
+
+function checkFeedbackRateLimit(req: express.Request) {
+  checkRateLimit(req, "feedback", 10);
+}
+
+function isPrivateAddress(address: string) {
+  const normalized = address.toLowerCase().replace(/^::ffff:/, "");
+  if (normalized === "::1" || normalized === "0:0:0:0:0:0:0:1") return true;
+  if (normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) return true;
+  if (isIP(normalized) !== 4) return false;
+  const parts = normalized.split(".").map(Number);
+  const [a, b] = parts;
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
+}
+
+async function assertSafeRemoteUrl(raw: string, allowHost?: (host: string) => boolean) {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ApiError("BAD_REQUEST", 400, "Invalid remote URL");
+  }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) {
+    throw new ApiError("BAD_REQUEST", 400, "Invalid remote URL");
+  }
+  const host = url.hostname.toLowerCase();
+  if (allowHost && !allowHost(host)) throw new ApiError("BAD_REQUEST", 400, "Host not allowed");
+  if (host === "localhost" || host.endsWith(".localhost") || isPrivateAddress(host)) {
+    throw new ApiError("BAD_REQUEST", 400, "Private network addresses are not allowed");
+  }
+  const addresses = await dns.lookup(host, { all: true }).catch(() => []);
+  if (!addresses.length || addresses.some((item) => isPrivateAddress(item.address))) {
+    throw new ApiError("BAD_REQUEST", 400, "Remote host is unavailable or resolves to a private network");
+  }
+  return url;
+}
+
+async function fetchSafeRemote(raw: string, allowHost?: (host: string) => boolean, init: RequestInit = {}) {
+  let current = raw;
+  for (let redirects = 0; redirects <= 3; redirects += 1) {
+    const url = await assertSafeRemoteUrl(current, allowHost);
+    const response = await fetch(url, {
+      ...init,
+      redirect: "manual",
+      signal: init.signal || AbortSignal.timeout(20_000),
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get("location");
+    if (!location) throw new ApiError("UPSTREAM_ERROR", 502, "Remote redirect is missing a location");
+    current = new URL(location, url).toString();
+  }
+  throw new ApiError("UPSTREAM_ERROR", 502, "Too many remote redirects");
 }
 
 async function sendFeedbackEmail(input: { subject: string; text: string }) {
@@ -224,7 +280,7 @@ async function appendBillingLedger(input: {
 }
 
 async function charge(req: express.Request, action: BillingAction, cost: number, metadata?: any) {
-  if (!billingEnabled()) return { balance: null as number | null, userId: null as string | null };
+  if (!billingEnabled()) return { balance: null as number | null, userId: null as string | null, amount: 0 };
   const userId = await requireSupabaseUserId(req);
   await ensureBillingAccount(userId);
 
@@ -238,7 +294,7 @@ async function charge(req: express.Request, action: BillingAction, cost: number,
   const safeCost = Math.max(0, Math.floor(Number(cost) || 0));
   if (safeCost <= 0) {
     const bal = await getBillingBalance(userId);
-    return { balance: bal, userId };
+    return { balance: bal, userId, amount: 0 };
   }
 
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -278,10 +334,43 @@ async function charge(req: express.Request, action: BillingAction, cost: number,
         } catch {}
         throw e;
       }
-      return { balance: nextBalance, userId };
+      return { balance: nextBalance, userId, amount: safeCost };
     }
   }
   throw new ApiError("INTERNAL_ERROR", 500, "Balance update contention");
+}
+
+type ChargeReceipt = Awaited<ReturnType<typeof charge>>;
+
+async function refundCharge(req: express.Request, action: BillingAction, receipt: ChargeReceipt | null, reason: string) {
+  if (!receipt?.userId || receipt.amount <= 0) return;
+  const sb = getSupabaseAdmin();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const { data, error } = await sb.from("user_wallets").select("balance").eq("user_id", receipt.userId).single();
+    if (error) break;
+    const current = Number((data as any)?.balance);
+    if (!Number.isFinite(current)) break;
+    const nextBalance = current + receipt.amount;
+    const { data: updated, error: updateError } = await sb
+      .from("user_wallets")
+      .update({ balance: nextBalance })
+      .eq("user_id", receipt.userId)
+      .eq("balance", current)
+      .select("balance")
+      .maybeSingle();
+    if (updateError) break;
+    if (updated) {
+      await appendBillingLedger({
+        userId: receipt.userId,
+        delta: receipt.amount,
+        reason: `${action}_refund`,
+        requestId: `${String((req as any).requestId || "req")}:${action}:refund`,
+        metadata: { note: `生成失败自动退回：${reason.slice(0, 160)}` },
+      }).catch((error) => console.error("Failed to record billing refund", error));
+      return;
+    }
+  }
+  console.error("Failed to refund charge", { action, requestId: (req as any).requestId });
 }
 
 const COMPANION_SPECIES_MAP: Record<
@@ -801,30 +890,19 @@ export function apiRouter() {
     try {
       const raw = String(req.query.url || "").trim();
       if (!raw) throw new ApiError("BAD_REQUEST", 400, "Missing url");
-      let u: URL;
-      try {
-        u = new URL(raw);
-      } catch {
-        throw new ApiError("BAD_REQUEST", 400, "Invalid url");
-      }
-      if (u.protocol !== "http:" && u.protocol !== "https:") {
-        throw new ApiError("BAD_REQUEST", 400, "Invalid url protocol");
-      }
-      const host = u.hostname.toLowerCase();
-      const allowed =
+      const isAllowedProxyHost = (host: string) =>
         host.endsWith(".tencentcos.cn") ||
         host.endsWith(".myqcloud.com") ||
         host.endsWith(".myqcloud.com.cn") ||
         host.endsWith(".volces.com") ||
         host.endsWith(".supabase.co") ||
         host.endsWith(".supabase.in");
-      if (!allowed) throw new ApiError("BAD_REQUEST", 400, "Host not allowed");
 
       const headers: Record<string, string> = {};
       const range = req.header("range");
       if (range) headers.range = range;
 
-      const upstream = await fetch(u.toString(), { method: "GET", headers, redirect: "follow" });
+      const upstream = await fetchSafeRemote(raw, isAllowedProxyHost, { method: "GET", headers });
 
       res.status(upstream.status);
       const passHeaders = [
@@ -907,15 +985,8 @@ export function apiRouter() {
         })
         .parse(req.body);
       const rawUrl = String(body.modelUrl || "").trim();
-      let parsed: URL;
-      try {
-        parsed = new URL(rawUrl);
-      } catch {
-        throw new ApiError("BAD_REQUEST", 400, "Invalid modelUrl");
-      }
-      if (!/^https?:$/i.test(parsed.protocol)) throw new ApiError("BAD_REQUEST", 400, "Invalid modelUrl protocol");
-
-      const upstream = await fetch(parsed.toString(), { method: "GET", redirect: "follow" });
+      const parsed = await assertSafeRemoteUrl(rawUrl);
+      const upstream = await fetchSafeRemote(parsed.toString(), undefined, { method: "GET" });
       if (!upstream.ok) {
         const txt = await upstream.text().catch(() => "");
         throw new ApiError("UPSTREAM_ERROR", 502, txt || `Download failed: HTTP ${upstream.status}`);
@@ -999,12 +1070,13 @@ export function apiRouter() {
   });
 
   router.post("/doubao/t2i", express.json({ limit: "2mb" }), async (req, res, next) => {
+    let receipt: ChargeReceipt | null = null;
     try {
       const parsed = t2iSchema.parse(req.body) satisfies T2IRequest;
       const costPerImageRaw = Number(process.env.BILLING_T2I_COST_PER_IMAGE);
       const costPerImage = Number.isFinite(costPerImageRaw) ? Math.max(0, Math.floor(costPerImageRaw)) : 40;
       const safeN = Math.max(1, Math.min(4, Math.floor(Number(parsed.n || 1))));
-      await charge(req, "t2i", costPerImage * safeN, { n: safeN, size: parsed.size || null });
+      receipt = await charge(req, "t2i", costPerImage * safeN, { n: safeN, size: parsed.size || null });
       const out = await doubaoTextToImage(parsed);
       if (!out.images?.length) throw new ApiError("UPSTREAM_ERROR", 502, "No images returned");
       
@@ -1022,12 +1094,14 @@ export function apiRouter() {
       
       res.json({ ...out, images: uploadedImages });
     } catch (e) {
+      await refundCharge(req, "t2i", receipt, String((e as any)?.message || e));
       next(e);
     }
   });
 
   router.post("/chat", express.json({ limit: "2mb" }), async (req, res, next) => {
     try {
+      checkRateLimit(req, "chat", 30);
       const body = chatSchema.parse(req.body);
       const out = await deepseekChat(body.messages);
       res.json(out);
@@ -1902,6 +1976,7 @@ ${partners_injection}
 
 
   router.post("/hunyuan3d/i2t", upload.single("image"), async (req, res, next) => {
+    let receipt: ChargeReceipt | null = null;
     try {
       const file = req.file;
       if (!file) throw new ApiError("BAD_REQUEST", 400, "Missing file: image");
@@ -1911,7 +1986,7 @@ ${partners_injection}
       
       const i23dCostRaw = Number(process.env.BILLING_I23D_COST);
       const i23dCost = Number.isFinite(i23dCostRaw) ? Math.max(0, Math.floor(i23dCostRaw)) : 249;
-      await charge(req, "i23d", i23dCost, { kind: "upload" });
+      receipt = await charge(req, "i23d", i23dCost, { kind: "upload" });
       
       const mimetype = String(file.mimetype || "application/octet-stream");
       const extMatch = String(file.originalname || "").toLowerCase().match(/\.([a-z0-9]{1,8})$/);
@@ -1928,21 +2003,24 @@ ${partners_injection}
       if (!out.taskId) throw new ApiError("UPSTREAM_ERROR", 502, "No taskId returned");
       res.json(out);
     } catch (e) {
+      await refundCharge(req, "i23d", receipt, String((e as any)?.message || e));
       next(e);
     }
   });
 
   router.post("/hunyuan3d/i2t-url", express.json({ limit: "1mb" }), async (req, res, next) => {
+    let receipt: ChargeReceipt | null = null;
     try {
       const body = z.object({ imageUrl: z.string().min(1).max(4000), prompt: z.string().optional() }).parse(req.body);
       const i23dCostRaw = Number(process.env.BILLING_I23D_COST);
       const i23dCost = Number.isFinite(i23dCostRaw) ? Math.max(0, Math.floor(i23dCostRaw)) : 249;
-      await charge(req, "i23d", i23dCost, { kind: "url" });
+      receipt = await charge(req, "i23d", i23dCost, { kind: "url" });
       // The upstream image-to-3D API rejects prompt when imageUrl/ImageBase64 is provided.
       const out = await hunyuanCreate3DTaskFromUrl({ imageUrl: body.imageUrl });
       if (!out.taskId) throw new ApiError("UPSTREAM_ERROR", 502, "No taskId returned");
       res.json(out);
     } catch (e) {
+      await refundCharge(req, "i23d", receipt, String((e as any)?.message || e));
       next(e);
     }
   });

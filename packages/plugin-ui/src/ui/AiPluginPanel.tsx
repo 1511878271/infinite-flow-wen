@@ -1089,8 +1089,14 @@ export function AiPluginPanel(props: AiPluginPanelProps) {
           ) : null}
 
           {error ? (
-            <div className="mb-4 rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-              {error}
+            <div className="mb-4 flex items-start justify-between gap-3 rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-200" role="alert">
+              <div>
+                <div className="font-semibold">操作未完成</div>
+                <div className="mt-1 text-xs leading-5 text-rose-100/90">{error}</div>
+              </div>
+              <button type="button" onClick={() => setError(undefined)} className="shrink-0 rounded-full px-2 py-1 text-xs hover:bg-white/10" aria-label="关闭错误提示">
+                关闭
+              </button>
             </div>
           ) : null}
 
@@ -1149,6 +1155,10 @@ export function AiPluginPanel(props: AiPluginPanelProps) {
               >
                 {t2iLoading ? "生成中..." : "生成图片"}
               </button>
+              <div className="-mt-2 flex items-center justify-between px-1 text-[11px] text-app-muted">
+                <span>预计 20–60 秒</span>
+                <span>预计消耗 {Math.max(1, n) * 40} 点，失败将自动退回</span>
+              </div>
 
               {images.length ? (
                 <div className={`grid gap-2 ${images.length === 1 ? "grid-cols-1" : "grid-cols-2"}`}>
@@ -1193,7 +1203,7 @@ export function AiPluginPanel(props: AiPluginPanelProps) {
                     </div>
                   </div>
                   <div className="rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
-                    一期骨架
+                    核心能力
                   </div>
                 </div>
                 <div className="mt-4 grid grid-cols-3 gap-2">
@@ -1218,12 +1228,21 @@ export function AiPluginPanel(props: AiPluginPanelProps) {
               </div>
 
               <button
-                disabled={companionLoading}
+                disabled={companionLoading || !props.historyPersonaId || !authToken}
                 onClick={runCompanionAwakening}
                 className="w-full rounded-2xl bg-accent px-4 py-3 text-sm font-bold text-white hover:bg-[#0066d6] disabled:opacity-60 transition-colors shadow-[0_12px_30px_rgba(0,122,255,0.22)]"
               >
-                {companionLoading ? "觉醒中..." : "开始觉醒伴生兽"}
+                {companionLoading
+                  ? "觉醒中..."
+                  : !props.historyPersonaId
+                    ? "请先选择人格卡片"
+                    : !authToken
+                      ? "登录后觉醒伴生兽"
+                      : "开始觉醒伴生兽"}
               </button>
+              <div className="-mt-2 px-1 text-center text-[11px] text-app-muted">
+                根据当前人格资料生成专属兽设与主视觉，预计 1 分钟。
+              </div>
 
               {companionProfile ? (
                 <div className="overflow-hidden rounded-3xl border border-app-border/12 bg-app-surface/20 flex flex-col">
