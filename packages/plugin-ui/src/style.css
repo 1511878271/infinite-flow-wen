@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:host {
+  --app-bg: 15 15 15;
+  --app-surface: 36 36 36;
+  --app-elevated: 20 20 20;
+  --app-border: 255 255 255;
+  --app-fg: 255 255 255;
+  --app-muted: 156 163 175;
+}
+
+.ai-plugin-root[data-app-theme="paper"] {
+  --app-bg: 248 250 252;
+  --app-surface: 255 255 255;
+  --app-elevated: 255 255 255;
+  --app-border: 15 23 42;
+  --app-fg: 15 23 42;
+  --app-muted: 71 85 105;
+}
+
+.ai-plugin-root[data-app-theme="midnight"] {
+  --app-bg: 6 11 22;
+  --app-surface: 11 18 32;
+  --app-elevated: 15 27 51;
+  --app-border: 120 160 255;
+  --app-fg: 230 240 255;
+  --app-muted: 134 163 199;
+}
+
+.ai-plugin-root[data-app-theme="dark"] {
+  --app-bg: 0 0 0;
+  --app-surface: 18 18 18;
+  --app-elevated: 10 10 10;
+  --app-border: 255 255 255;
+  --app-fg: 255 255 255;
+  --app-muted: 156 163 175;
+}
+
+.ai-plugin-root {
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+    "Apple Color Emoji", "Segoe UI Emoji";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.ai-plugin-root .custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--app-border) / 0.28) transparent;
+}
+
+.ai-plugin-root .custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.ai-plugin-root .custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ai-plugin-root .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgb(var(--app-border) / 0.22);
+  border-radius: 999px;
+}
+
+.ai-plugin-root .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--app-border) / 0.34);
+}

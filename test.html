@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>插件嵌入测试</title>
+  <style>
+    body { background-color: #000; display: flex; justify-content: center; padding-top: 50px; }
+  </style>
+</head>
+<body>
+
+  <!-- 这里是你嵌入的组件 -->
+  <ai-plugin-panel 
+    api-base-url="http://localhost:8787" 
+    token="replace-with-a-short-lived-token"
+    theme="dark">
+  </ai-plugin-panel>
+
+  <!-- 引入脚本 -->
+  <script type="module" src="http://localhost:8787/embed/ai-plugin-wc.js"></script>
+</body>
+</html>

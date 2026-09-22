@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Resonance Demo Component</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent;
+    }
+    ai-resonance-demo {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #loading {
+      padding: 20px;
+      color: #fff;
+      text-align: center;
+      font-family: sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">加载共鸣聊天中...</div>
+  <div id="root" style="width: 100%; height: 100%; display: none;">
+    <!-- 如果 React 组件未加载，显示加载中 -->
+    <div style="color: white; text-align: center; padding-top: 50px;">
+      Loading AI Resonance...
+    </div>
+  </div>
+
+  <script>
+    // Streamlit Component Setup
+    function sendMessageToStreamlit(type, data) {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: type,
+        ...data
+      }, "*");
+    }
+
+    function setComponentValue(value) {
+      sendMessageToStreamlit("streamlit:setComponentValue", { value: value });
+    }
+
+    function setFrameHeight(height) {
+      sendMessageToStreamlit("streamlit:setFrameHeight", { height: height });
+    }
+
+    // 监听 Streamlit 传来的参数
+    window.addEventListener("message", function(event) {
+      if (event.data.type === "streamlit:render") {
+        const args = event.data.args;
+        
+        // args 就是 Python 侧传过来的字典
+        const host = window.location.hostname || "localhost";
+        const defaultBase = `http://${host}:8787`;
+        const apiBaseUrl = args.api_base_url && args.api_base_url.includes("localhost") ? defaultBase : (args.api_base_url || defaultBase);
+        const chatHistory = args.chat_history || "[]";
+        
+        // 渲染组件
+        const root = document.getElementById("root");
+        if (!window.pluginLoaded) {
+          window.pluginLoaded = true;
+          root.innerHTML = ""; // 清空 loading
+          document.getElementById("loading").style.display = "none";
+          root.style.display = "block";
+          
+          setFrameHeight(720); // 在 render 时再确认一次高度
+          // 初始化加载脚本
+          const s = document.createElement("script");
+          s.type = "module";
+          s.src = `${apiBaseUrl}/embed/ai-plugin-wc.js`;
+          s.onload = () => {
+            document.getElementById("loading").style.display = "none";
+            root.style.display = "block";
+            const el = document.createElement("ai-resonance-demo");
+            el.setAttribute("api-base-url", apiBaseUrl);
+            el.setAttribute("chat-history", chatHistory);
+            root.appendChild(el);
+            
+            // 监听 React 侧发出的自定义事件
+          el.addEventListener("on-chat-send", (e) => {
+            const payload = e.detail;
+            if (typeof payload === "string") {
+              setComponentValue({ text: payload, role: "user", id: Date.now() });
+            } else {
+              setComponentValue({ text: payload.text, role: payload.role || "user", id: Date.now() });
+            }
+          });
+
+          el.addEventListener("on-chat-exit", (e) => {
+            const payload = e.detail || {};
+            setComponentValue({ type: "exit", mode: payload.mode || "close", id: Date.now() });
+          });
+            
+            setFrameHeight(720);
+          };
+          document.head.appendChild(s);
+        } else {
+          // 更新属性
+          const el = root.querySelector("ai-resonance-demo");
+          if (el) {
+            el.setAttribute("chat-history", chatHistory);
+          }
+        }
+      }
+    });
+
+    // 告诉 Streamlit 组件准备好了
+    sendMessageToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+    setFrameHeight(720);
+  </script>
+</body>
+</html>

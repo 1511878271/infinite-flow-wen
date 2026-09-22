@@ -1,0 +1,91 @@
+.ai-plugin-root[data-ai-theme="paper"] {
+  color: #0f172a;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .bg-slate-950 {
+  background-color: #f8fafc;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .bg-slate-900 {
+  background-color: #ffffff;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .bg-slate-800 {
+  background-color: #f1f5f9;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .border-slate-800 {
+  border-color: rgba(15, 23, 42, 0.14);
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .border-slate-700 {
+  border-color: rgba(15, 23, 42, 0.18);
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .text-slate-100 {
+  color: #0f172a;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .text-slate-200 {
+  color: #1f2937;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .text-slate-300 {
+  color: #475569;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .text-slate-400 {
+  color: #64748b;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .text-white {
+  color: #0f172a;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .hover\:text-white:hover {
+  color: #0f172a;
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .hover\:bg-white\/10:hover {
+  background-color: rgba(15, 23, 42, 0.06);
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .hover\:bg-slate-800:hover {
+  background-color: rgba(15, 23, 42, 0.06);
+}
+
+.ai-plugin-root[data-ai-theme="paper"] .hover\:bg-slate-800\/50:hover {
+  background-color: rgba(15, 23, 42, 0.04);
+}
+
+.ai-plugin-root[data-ai-theme="midnight"] {
+  color: #e6f0ff;
+}
+
+.ai-plugin-root[data-ai-theme="midnight"] .bg-slate-950 {
+  background-color: #060b16;
+}
+
+.ai-plugin-root[data-ai-theme="midnight"] .bg-slate-900 {
+  background-color: #0b1220;
+}
+
+.ai-plugin-root[data-ai-theme="midnight"] .bg-slate-800 {
+  background-color: #0f1b33;
+}
+
+.ai-plugin-root[data-ai-theme="midnight"] .border-slate-800 {
+  border-color: rgba(120, 160, 255, 0.22);
+}
+
+.ai-plugin-root[data-ai-theme="midnight"] .border-slate-700 {
+  border-color: rgba(120, 160, 255, 0.28);
+}
+
+.ai-plugin-root[data-ai-theme="midnight"] .text-slate-300 {
+  color: #a9bfdc;
+}
+
+.ai-plugin-root[data-ai-theme="midnight"] .text-slate-400 {
+  color: #86a3c7;
+}

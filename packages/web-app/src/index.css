@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --app-bg: 15 15 15;
+  --app-surface: 36 36 36;
+  --app-elevated: 20 20 20;
+  --app-border: 255 255 255;
+  --app-fg: 255 255 255;
+  --app-muted: 156 163 175;
+}
+
+html[data-app-theme="paper"] {
+  --app-bg: 248 250 252;
+  --app-surface: 255 255 255;
+  --app-elevated: 255 255 255;
+  --app-border: 15 23 42;
+  --app-fg: 15 23 42;
+  --app-muted: 71 85 105;
+}
+
+html[data-app-theme="midnight"] {
+  --app-bg: 6 11 22;
+  --app-surface: 11 18 32;
+  --app-elevated: 15 27 51;
+  --app-border: 120 160 255;
+  --app-fg: 230 240 255;
+  --app-muted: 134 163 199;
+}
+
+html[data-app-theme="dark"] {
+  --app-bg: 0 0 0;
+  --app-surface: 18 18 18;
+  --app-elevated: 10 10 10;
+  --app-border: 255 255 255;
+  --app-fg: 255 255 255;
+  --app-muted: 156 163 175;
+}
+
+html[data-app-theme] .bg-\[\#131313\] {
+  background-color: rgb(var(--app-bg)) !important;
+}
+
+html[data-app-theme] .bg-\[\#0f0f0f\] {
+  background-color: rgb(var(--app-bg)) !important;
+}
+
+html[data-app-theme] .bg-\[\#242424\] {
+  background-color: rgb(var(--app-surface)) !important;
+}
+
+html[data-app-theme] .bg-\[\#1f1f1f\] {
+  background-color: rgb(var(--app-surface)) !important;
+}
+
+html[data-app-theme] .bg-\[\#1b1b1b\] {
+  background-color: rgb(var(--app-elevated)) !important;
+}
+
+html[data-app-theme] .bg-\[\#141414\] {
+  background-color: rgb(var(--app-elevated)) !important;
+}
+
+html[data-app-theme] .bg-\[\#1a1a1a\] {
+  background-color: rgb(var(--app-elevated)) !important;
+}
+
+html[data-app-theme] .border-white\/5 {
+  border-color: rgb(var(--app-border) / 0.08) !important;
+}
+
+html[data-app-theme] .border-white\/10 {
+  border-color: rgb(var(--app-border) / 0.12) !important;
+}
+
+html[data-app-theme] .border-white\/15 {
+  border-color: rgb(var(--app-border) / 0.16) !important;
+}
+
+html[data-app-theme] .border-white\/20 {
+  border-color: rgb(var(--app-border) / 0.2) !important;
+}
+
+@layer base {
+  body {
+    @apply m-0 p-0 overflow-x-hidden;
+    background-color: rgb(var(--app-bg));
+    color: rgb(var(--app-fg));
+  }
+}
+
+/* Custom scrollbar for modern feel */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--app-border) / 0.28) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgb(var(--app-border) / 0.22);
+  border-radius: 999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--app-border) / 0.34);
+}

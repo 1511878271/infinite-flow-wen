@@ -1,0 +1,30 @@
+node_modules
+dist
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+!**/.env.example
+.streamlit/secrets.toml
+.streamlit/auth_cache.json
+backup/secrets.toml
+pem key/
+*.pem
+.DS_Store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+pnpm-workspace.yaml
+111.txt
+backup/
+
+# Local/generated binary assets are deployed separately from source control.
+glb/
+MP4/
+**/public/glb/
+**/public/video/
+streamlit_component/glb/
+streamlit_component/video/
