@@ -3602,12 +3602,47 @@ function HomePage({
     setProfileEnrichmentAnswers(draft.answers && typeof draft.answers === "object" ? draft.answers : {});
     setProfileEnrichmentDetail(String(draft.detail || ""));
     setProfileEnrichmentOpen(true);
+    const accessToken = String(session?.access_token || "");
+    if (accessToken) {
+      void fetch(`${API_BASE_URL}/api/personas/${encodeURIComponent(id)}/profile-enrichment`, {
+        headers: withPluginTokenHeaders({ authorization: `Bearer ${accessToken}` }),
+      })
+        .then(async (response) => {
+          if (!response.ok) return null;
+          return response.json();
+        })
+        .then((remote) => {
+          if (!remote) return;
+          if (remote.completed) {
+            setProfileEnrichmentOpen(false);
+            setProfileEnrichmentTargetId("");
+            try { localStorage.setItem(enrichmentStorageKey(id, "complete"), "1"); } catch {}
+            return;
+          }
+          if (remote.answers && typeof remote.answers === "object" && Object.keys(remote.answers).length) {
+            setProfileEnrichmentAnswers(remote.answers);
+            setProfileEnrichmentStep(Math.min(Object.keys(remote.answers).length, PROFILE_ENRICHMENT_QUESTIONS.length - 1));
+          }
+        })
+        .catch(() => {});
+    }
   };
 
   const persistEnrichmentDraft = (personaId: string, step: number, answers: Record<string, string>, detail = "") => {
     try {
       localStorage.setItem(enrichmentStorageKey(personaId, "draft"), JSON.stringify({ step, answers, detail }));
     } catch {}
+    const accessToken = String(session?.access_token || "");
+    if (accessToken && personaId) {
+      void fetch(`${API_BASE_URL}/api/personas/${encodeURIComponent(personaId)}/profile-enrichment`, {
+        method: "PUT",
+        headers: withPluginTokenHeaders({
+          "content-type": "application/json",
+          authorization: `Bearer ${accessToken}`,
+        }),
+        body: JSON.stringify({ questionnaireVersion: 1, answers, completed: false }),
+      }).catch(() => {});
+    }
   };
 
   const saveProfileEnrichment = async (answers: Record<string, string>) => {
@@ -3626,6 +3661,23 @@ function HomePage({
         .join("\n")
         .slice(0, 4000);
       const nextTraits = summary.slice(0, 2000);
+      const accessToken = String(session?.access_token || "");
+      if (!accessToken) throw new Error("登录已失效，请重新登录");
+      const enrichmentResponse = await fetch(
+        `${API_BASE_URL}/api/personas/${encodeURIComponent(personaId)}/profile-enrichment`,
+        {
+          method: "PUT",
+          headers: withPluginTokenHeaders({
+            "content-type": "application/json",
+            authorization: `Bearer ${accessToken}`,
+          }),
+          body: JSON.stringify({ questionnaireVersion: 1, answers, completed: true }),
+        },
+      );
+      if (!enrichmentResponse.ok) {
+        const errorBody = await enrichmentResponse.json().catch(() => ({}));
+        throw new Error(errorBody?.message || "服务端保存失败");
+      }
       let update = await supabase
         .from("personas")
         .update({ logic: nextLogic, custom_traits: nextTraits })

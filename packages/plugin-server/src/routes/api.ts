@@ -270,12 +270,21 @@ async function appendBillingLedger(input: {
   metadata?: any;
 }) {
   const sb = getSupabaseAdmin();
-  const { error } = await sb.from("transaction_logs").insert({
+  const payload = {
     user_id: input.userId,
     amount: input.delta,
     type: input.reason,
-    description: input.metadata?.note || input.reason
-  });
+    description: input.metadata?.note || input.reason,
+    request_id: input.requestId,
+  };
+  let { error } = await sb.from("transaction_logs").insert(payload);
+  // Backward compatibility while older deployments are waiting for the
+  // request_id migration. New deployments should always use the idempotent path.
+  if (error && /request_id|schema cache|column/i.test(String((error as any)?.message || ""))) {
+    const fallback = { ...payload } as any;
+    delete fallback.request_id;
+    ({ error } = await sb.from("transaction_logs").insert(fallback));
+  }
   if (error) throw new ApiError("INTERNAL_ERROR", 500, error.message || "Failed to write transaction logs");
 }
 
@@ -672,47 +681,45 @@ export function apiRouter() {
   router.post("/billing/mock-recharge", express.json(), async (req, res, next) => {
     try {
       if (!billingEnabled()) throw new ApiError("INTERNAL_ERROR", 500, "Billing disabled");
-      const userId = await requireSupabaseUserId(req);
-      const { rmb, points } = req.body;
-      
-      if (typeof rmb !== 'number' || typeof points !== 'number' || rmb <= 0) {
-        throw new ApiError("BAD_REQUEST", 400, "Invalid recharge amount");
+      if (String(process.env.BILLING_ALLOW_MOCK_RECHARGE || "") !== "1" || process.env.NODE_ENV === "production") {
+        throw new ApiError("NOT_FOUND", 404, "Mock recharge is disabled");
       }
+      const userId = await requireSupabaseUserId(req);
+      const body = z.object({ rmb: z.number().int().min(1).max(10000) }).parse(req.body);
+      const points = body.rmb * 100;
 
       await ensureBillingAccount(userId);
       const sb = getSupabaseAdmin();
 
       // 直接增加积分并记录日志 (模拟支付成功回调)
-      const { data: oldWallet, error: fetchErr } = await sb
-        .from("user_wallets")
-        .select("balance, version")
-        .eq("user_id", userId)
-        .single();
-        
-      if (fetchErr || !oldWallet) throw new ApiError("INTERNAL_ERROR", 500, "Failed to read wallet");
-
-      const newBalance = oldWallet.balance + points;
-      const { data: updatedWallet, error: updateErr } = await sb
-        .from("user_wallets")
-        .update({ balance: newBalance, version: oldWallet.version + 1 })
-        .eq("user_id", userId)
-        .eq("version", oldWallet.version)
-        .select()
-        .single();
-
-      if (updateErr || !updatedWallet) {
-        throw new ApiError("INTERNAL_ERROR", 500, "Failed to recharge (Concurrent modification)");
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const { data: oldWallet, error: fetchErr } = await sb
+          .from("user_wallets")
+          .select("balance, total_recharged")
+          .eq("user_id", userId)
+          .single();
+        if (fetchErr || !oldWallet) continue;
+        const currentBalance = Number(oldWallet.balance) || 0;
+        const newBalance = currentBalance + points;
+        const { data: updatedWallet, error: updateErr } = await sb
+          .from("user_wallets")
+          .update({ balance: newBalance, total_recharged: (Number(oldWallet.total_recharged) || 0) + points })
+          .eq("user_id", userId)
+          .eq("balance", currentBalance)
+          .select("balance")
+          .maybeSingle();
+        if (updateErr || !updatedWallet) continue;
+        await appendBillingLedger({
+          userId,
+          delta: points,
+          reason: "mock_recharge",
+          requestId: `${String((req as any).requestId || "req")}:mock_recharge`,
+          metadata: { note: `开发环境模拟充值 ${body.rmb} 元` },
+        });
+        res.json({ success: true, added: points, balance: newBalance });
+        return;
       }
-
-      await sb.from("transaction_logs").insert({
-        user_id: userId,
-        tx_type: "recharge",
-        amount: points,
-        description: `模拟在线充值 ${rmb} 元`,
-        balance_after: newBalance
-      });
-
-      res.json({ success: true, added: points, balance: newBalance });
+      throw new ApiError("INTERNAL_ERROR", 500, "Failed to recharge (Concurrent modification)");
     } catch (e) {
       next(e);
     }
@@ -1825,6 +1832,7 @@ ${partners_injection}
   });
 
   router.post("/storyboard", express.json({ limit: "2mb" }), async (req, res, next) => {
+    let receipt: ChargeReceipt | null = null;
     try {
       const p = storyboardSchema.parse(req.body);
       
@@ -1832,7 +1840,7 @@ ${partners_injection}
       const costPerShot = Number(process.env.BILLING_T2I_COST_PER_IMAGE) || 40;
       const totalCost = costPerShot * p.shots;
       
-      const { balance, userId } = await charge(req, "storyboard", totalCost, { shots: p.shots, worldName: p.worldName });
+      receipt = await charge(req, "storyboard", totalCost, { shots: p.shots, worldName: p.worldName });
 
       const player_a = `${p.myInfo.name} [${p.myInfo.mbti || "未知"}]`;
       const partnerListRaw = Array.isArray((p as any).partners)
@@ -1945,6 +1953,7 @@ ${partners_injection}
         shots: images,
       });
     } catch (e) {
+      await refundCharge(req, "storyboard", receipt, String((e as any)?.message || e));
       next(e);
     }
   });
@@ -2096,6 +2105,62 @@ ${partners_injection}
         
       if (error) throw new ApiError("INTERNAL_ERROR", 500, error.message);
       res.json({ success: true, data });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  const profileEnrichmentSchema = z.object({
+    questionnaireVersion: z.number().int().min(1).max(100).optional().default(1),
+    answers: z.record(z.string().max(500)).refine((value) => Object.keys(value).length <= 30, "Too many answers"),
+    completed: z.boolean().optional().default(false),
+  });
+
+  router.get("/personas/:id/profile-enrichment", async (req, res, next) => {
+    try {
+      const userId = await requireSupabaseUserId(req);
+      const personaId = String(req.params.id || "").trim();
+      const sb = getSupabaseAdmin();
+      const { data: persona } = await sb.from("personas").select("id,user_id").eq("id", personaId).maybeSingle();
+      if (!persona) throw new ApiError("NOT_FOUND", 404, "Persona not found");
+      if (String(persona.user_id || "") !== userId) throw new ApiError("FORBIDDEN", 403, "Not your persona");
+      const { data, error } = await sb
+        .from("persona_profile_enrichments")
+        .select("questionnaire_version,answers,completed_at,updated_at")
+        .eq("persona_id", personaId)
+        .maybeSingle();
+      if (error) throw new ApiError("INTERNAL_ERROR", 500, error.message);
+      res.json({
+        questionnaireVersion: Number((data as any)?.questionnaire_version || 1),
+        answers: (data as any)?.answers || {},
+        completed: Boolean((data as any)?.completed_at),
+        updatedAt: (data as any)?.updated_at || null,
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.put("/personas/:id/profile-enrichment", express.json({ limit: "64kb" }), async (req, res, next) => {
+    try {
+      const userId = await requireSupabaseUserId(req);
+      const personaId = String(req.params.id || "").trim();
+      const body = profileEnrichmentSchema.parse(req.body || {});
+      const sb = getSupabaseAdmin();
+      const { data: persona } = await sb.from("personas").select("id,user_id").eq("id", personaId).maybeSingle();
+      if (!persona) throw new ApiError("NOT_FOUND", 404, "Persona not found");
+      if (String(persona.user_id || "") !== userId) throw new ApiError("FORBIDDEN", 403, "Not your persona");
+      const now = new Date().toISOString();
+      const { error } = await sb.from("persona_profile_enrichments").upsert({
+        persona_id: personaId,
+        user_id: userId,
+        questionnaire_version: body.questionnaireVersion,
+        answers: body.answers,
+        completed_at: body.completed ? now : null,
+        updated_at: now,
+      }, { onConflict: "persona_id" });
+      if (error) throw new ApiError("INTERNAL_ERROR", 500, error.message);
+      res.json({ ok: true, completed: body.completed, updatedAt: now });
     } catch (e) {
       next(e);
     }
@@ -2269,11 +2334,12 @@ ${partners_injection}
 
       let imageUrl: string | undefined;
       const imagePrompt = parsed.imagePrompt || `A mysterious ${profile.speciesBase}, cinematic lighting, masterpiece`;
+      let companionImageReceipt: ChargeReceipt | null = null;
       
       try {
         const costPerImageRaw = Number(process.env.BILLING_T2I_COST_PER_IMAGE);
         const costPerImage = Number.isFinite(costPerImageRaw) ? Math.max(0, Math.floor(costPerImageRaw)) : 40;
-        await charge(req, "companion_t2i", costPerImage, { personaId });
+        companionImageReceipt = await charge(req, "companion_t2i", costPerImage, { personaId });
 
         const out = await doubaoTextToImage({ prompt: imagePrompt, size: "1440x2560", n: 1 } as T2IRequest);
         const rawImageUrl = Array.isArray(out?.images) && out.images[0] ? String(out.images[0]) : undefined;
@@ -2288,16 +2354,18 @@ ${partners_injection}
           }
         }
       } catch (err) {
+        await refundCharge(req, "companion_t2i", companionImageReceipt, String((err as any)?.message || err));
         console.error("Companion T2I error:", err);
         imageUrl = undefined;
       }
 
       let sceneBgUrl: string | undefined;
+      let companionSceneReceipt: ChargeReceipt | null = null;
       try {
         const costPerImageRaw = Number(process.env.BILLING_T2I_COST_PER_IMAGE);
         const costPerImage = Number.isFinite(costPerImageRaw) ? Math.max(0, Math.floor(costPerImageRaw)) : 40;
         const sceneBgPrompt = buildCompanionSceneBgPrompt(profile);
-        await charge(req, "companion_scene_bg", costPerImage, { personaId, autoFromAwaken: true });
+        companionSceneReceipt = await charge(req, "companion_scene_bg", costPerImage, { personaId, autoFromAwaken: true });
 
         const bgOut = await doubaoTextToImage({ prompt: sceneBgPrompt, size: "2560x1440", n: 1 } as T2IRequest);
         const rawBgUrl = Array.isArray(bgOut?.images) && bgOut.images[0] ? String(bgOut.images[0]) : undefined;
@@ -2312,6 +2380,7 @@ ${partners_injection}
           }
         }
       } catch (err) {
+        await refundCharge(req, "companion_scene_bg", companionSceneReceipt, String((err as any)?.message || err));
         console.error("Companion scene bg auto generation error:", err);
         sceneBgUrl = undefined;
       }
@@ -2361,6 +2430,7 @@ ${partners_injection}
   });
 
   router.post("/personas/:id/companion-beast/scene-bg", express.json({ limit: "64kb" }), async (req, res, next) => {
+    let receipt: ChargeReceipt | null = null;
     try {
       const userId = await requireSupabaseUserId(req);
       const personaId = String(req.params.id || "").trim();
@@ -2398,7 +2468,7 @@ ${partners_injection}
       const prompt = buildCompanionSceneBgPrompt(profile);
       const costPerImageRaw = Number(process.env.BILLING_T2I_COST_PER_IMAGE);
       const costPerImage = Number.isFinite(costPerImageRaw) ? Math.max(0, Math.floor(costPerImageRaw)) : 40;
-      await charge(req, "companion_scene_bg", costPerImage, { personaId, historyItemId: targetItem.id || null });
+      receipt = await charge(req, "companion_scene_bg", costPerImage, { personaId, historyItemId: targetItem.id || null });
 
       const out = await doubaoTextToImage({ prompt, size: "2560x1440", n: 1 } as T2IRequest);
       const rawImageUrl = Array.isArray(out?.images) && out.images[0] ? String(out.images[0]) : undefined;
@@ -2425,6 +2495,7 @@ ${partners_injection}
 
       res.json({ imageUrl, historyItemId: String(targetItem.id || "") });
     } catch (e) {
+      await refundCharge(req, "companion_scene_bg", receipt, String((e as any)?.message || e));
       next(e);
     }
   });
@@ -2480,12 +2551,13 @@ ${partners_injection}
 
       let imageUrl: string | undefined;
       const imagePrompt = parsed.imagePrompt || `A mysterious ${parsed.speciesBase || "beast"}, cinematic lighting, masterpiece`;
+      let creatorImageReceipt: ChargeReceipt | null = null;
       
       try {
         // We charge a generic t2i cost
         const costPerImageRaw = Number(process.env.BILLING_T2I_COST_PER_IMAGE);
         const costPerImage = Number.isFinite(costPerImageRaw) ? Math.max(0, Math.floor(costPerImageRaw)) : 40;
-        await charge(req, "companion_t2i_creator", costPerImage, { autoFromAwaken: true });
+        creatorImageReceipt = await charge(req, "companion_t2i_creator", costPerImage, { autoFromAwaken: true });
 
         const out = await doubaoTextToImage({ prompt: imagePrompt, size: "1440x2560", n: 1 } as T2IRequest);
         const rawImageUrl = Array.isArray(out?.images) && out.images[0] ? String(out.images[0]) : undefined;
@@ -2500,6 +2572,7 @@ ${partners_injection}
           }
         }
       } catch (err) {
+        await refundCharge(req, "companion_t2i_creator", creatorImageReceipt, String((err as any)?.message || err));
         console.error("Creator T2I error:", err);
         imageUrl = undefined;
       }
